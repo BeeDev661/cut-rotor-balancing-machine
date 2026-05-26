@@ -1,0 +1,30 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.vscode/
+.DS_Store
+*.log
+*.sqlite3
+
+# IDE/editor folders
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Streamlit
+.streamlit/
