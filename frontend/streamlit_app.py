@@ -471,63 +471,12 @@ def main():
     
     st.title("🔄 Rotor Balancing Machine")
     
-    if "token" not in st.session_state:
-        st.session_state["token"] = None
-        st.session_state["username"] = None
-
-    with st.sidebar:
-        st.markdown("### 🔐 Authentication")
-        hide_until = st.session_state.get("hide_auth_until", 0)
-        
-        if hide_until and time.time() < hide_until:
-            st.info("Finalizing authentication...")
-        else:
-            auth_mode = st.radio("Mode", ["Login", "Signup"], label_visibility="collapsed")
-            username = st.text_input("Username", placeholder="Enter username", label_visibility="collapsed")
-            password = st.text_input("Password", type="password", placeholder="Enter password", label_visibility="collapsed")
-            
-            col_auth1, col_auth2 = st.columns(2)
-            with col_auth1:
-                if st.button(auth_mode, use_container_width=True):
-                    if not username or not password:
-                        set_toast("Please enter both username and password", "error")
-                    else:
-                        # Safety Block: Pause core dashboard loops briefly during database transaction
-                        st.session_state["hide_auth_until"] = time.time() + 3.5
-                        try:
-                            resp = requests.post(f"{API_URL}/{auth_mode.lower()}", json={"username": username, "password": password}, timeout=5)
-                            data = resp.json()
-                            if resp.status_code == 200 and data:
-                                st.session_state["token"] = data.get("access_token")
-                                st.session_state["username"] = username
-                                set_toast(f"{auth_mode} successful!", "success")
-                                st.rerun()
-                            else:
-                                set_toast(data.get("detail", "Authentication failed."), "error")
-                                st.session_state["hide_auth_until"] = 0
-                        except Exception as e:
-                            set_toast(f"Auth network error: {e}", "error")
-                            st.session_state["hide_auth_until"] = 0
-
-        if st.session_state.get("token"):
-            st.markdown(f"**✓ Logged in:** {st.session_state.get('username')}")
-            if st.button("Logout", use_container_width=True):
-                st.session_state["token"] = None
-                st.session_state["username"] = None
-                st.rerun()
-            st.markdown("---")
-
-    token = st.session_state.get("token")
-    if not token:
-        st.warning("Please log in or sign up in the sidebar to view the live engine monitor metrics.")
-        st.stop()
-
     if "ws_queue" not in st.session_state:
         st.session_state["ws_queue"] = queue.Queue()
         t = threading.Thread(target=ws_thread, args=(st.session_state["ws_queue"],), daemon=True)
         t.start()
 
-    headers = {"Authorization": f"Bearer {token}"}
+    headers = {}
     if "local_running" not in st.session_state: st.session_state["local_running"] = False
     if "local_rpm" not in st.session_state: st.session_state["local_rpm"] = 30.0
 

@@ -73,14 +73,6 @@ class MQTTHandler:
         try:
             topic = msg.topic
             payload = json.loads(msg.payload.decode())
-            payload_raw = msg.payload.decode()
-            
-            try:
-                # Attempt to parse as JSON
-                payload = json.loads(payload_raw)
-            except json.JSONDecodeError:
-                # Fallback for plain string messages (like "online/offline" status)
-                payload = {"status_text": payload_raw}
             
             logger.debug(f"MQTT message from {topic}: {payload}")
             
