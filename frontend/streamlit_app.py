@@ -322,12 +322,13 @@ def ws_thread(q: queue.Queue):
 
 
 def render_dashboard():
-    acc_buffer = np.zeros(4096)
-    sample_rate = 2048
-
-    history_len = st.session_state.get("history_len", 200)
-    amp_history = deque(maxlen=history_len)
-    time_history = deque(maxlen=history_len)
+    # Initialize persistent state for live data
+    if "acc_buffer" not in st.session_state: st.session_state["acc_buffer"] = np.zeros(4096)
+    if "sample_rate" not in st.session_state: st.session_state["sample_rate"] = 2048
+    if "amp_history" not in st.session_state: 
+        history_len = st.session_state.get("history_len", 200)
+        st.session_state["amp_history"] = deque(maxlen=history_len)
+        st.session_state["time_history"] = deque(maxlen=history_len)
 
     if "bal_radius_cm" not in st.session_state: st.session_state["bal_radius_cm"] = 5.0
     if "sensitivity" not in st.session_state: st.session_state["sensitivity"] = 1.0
@@ -337,6 +338,8 @@ def render_dashboard():
     # Signal Tracking States
     if "last_signal_time" not in st.session_state: st.session_state["last_signal_time"] = 0
     if "has_signal" not in st.session_state: st.session_state["has_signal"] = False
+    if "signal_status_message" not in st.session_state: 
+        st.session_state["signal_status_message"] = "Waiting for ESP32 signal..."
 
     toast_slot = st.empty()
     placeholder = st.empty()
@@ -349,39 +352,30 @@ def render_dashboard():
     while not q.empty():
         data = q.get_nowait()
         arr = np.array(data.get("acc", []), dtype=float)
-        sample_rate = int(data.get("sample_rate", sample_rate))
-        acc_buffer = np.roll(acc_buffer, -len(arr))
-        acc_buffer[-len(arr) :] = arr
+        st.session_state["sample_rate"] = int(data.get("sample_rate", st.session_state["sample_rate"]))
+        st.session_state["acc_buffer"] = np.roll(st.session_state["acc_buffer"], -len(arr))
+        st.session_state["acc_buffer"][-len(arr) :] = arr
         last_rpm = float(data.get("rpm", last_rpm))
         
         # Logic for new signal notification
         if not st.session_state["has_signal"]:
             set_toast("🚀 ESP32 Signal Received! Monitoring Live.", "success", duration=4.0)
             st.session_state["has_signal"] = True
+            st.session_state["signal_status_message"] = "ESP32 signal received!"
             
         st.session_state["last_signal_time"] = time.time()
         updated = True
 
-    if not updated and st.session_state.get("local_running", False):
-        sim_rpm = float(st.session_state.get("local_rpm", last_rpm))
-        last_rpm = sim_rpm
-        n = int(sample_rate * 0.1)
-        t = np.arange(n) / sample_rate
-        rotor_hz = max(0.1, sim_rpm / 60.0)
-        signal = 1.0 * np.sin(2 * np.pi * rotor_hz * t) + 0.3 * np.sin(2 * np.pi * 2 * rotor_hz * t)
-        arr = (signal + np.random.normal(scale=0.05, size=n)).astype(float)
-        acc_buffer = np.roll(acc_buffer, -len(arr))
-        acc_buffer[-len(arr) :] = arr
-        updated = True
     # Check for signal loss (timeout after 5 seconds)
     if time.time() - st.session_state["last_signal_time"] > 5.0:
         if st.session_state["has_signal"]:
             st.session_state["has_signal"] = False
+            st.session_state["signal_status_message"] = "No ESP32 signal received. Please check hardware."
         updated = False # Block chart rendering
 
-    n = len(acc_buffer)
-    freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
-    fft_complex = np.fft.rfft(acc_buffer)
+    n = len(st.session_state["acc_buffer"])
+    freqs = np.fft.rfftfreq(n, 1.0 / st.session_state["sample_rate"])
+    fft_complex = np.fft.rfft(st.session_state["acc_buffer"])
     fft = np.abs(fft_complex)
 
     rotor_hz = max(0.1, last_rpm / 60.0)
@@ -390,8 +384,8 @@ def render_dashboard():
     phase_at_rotor = float(np.angle(fft_complex[idx])) if idx < len(fft_complex) else 0.0
 
     if updated:
-        amp_history.append(amp_at_rotor)
-        time_history.append(time.time())
+        st.session_state["amp_history"].append(amp_at_rotor)
+        st.session_state["time_history"].append(time.time())
 
     recommended_mass_g = amp_at_rotor * float(st.session_state.get("sensitivity", 1.0))
     measured_deg = (np.degrees(phase_at_rotor) + 360.0) % 360.0
@@ -407,19 +401,14 @@ def render_dashboard():
         recommended_mass_physics_g = max(0.0, ((amp_m_s2 * rotor_mass_kg) / (r_m * (omega ** 2))) * 1000.0)
 
     with placeholder.container(): # Use a container to update all elements at once
-        if not updated: # If no new data from ESP32
-            st.info(st.session_state["signal_status_message"])
-            # Display empty charts or a message over them
         if not updated: 
-            st.error("📡 No ESP32 Signal Detected. Check hardware connection or WiFi.")
+            st.info(st.session_state["signal_status_message"])
             st.markdown("---")
             st.markdown("### 📈 Real-Time Analysis")
             st.warning("No live data to display. Waiting for ESP32 signal...")
-            st.info("The dashboard is ready. Charts will appear once the ESP32 starts transmitting.")
             st.markdown("---")
             st.markdown("### ⚖️ Balancing Recommendations")
-            st.warning("No live data to display. Waiting for ESP32 signal...")
-            st.info("Waiting for live signal...")
+            st.warning("Waiting for live signal...")
         else: # Display charts with live data
             metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
             with metric_col1:
@@ -438,7 +427,7 @@ def render_dashboard():
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                fig = go.Figure(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", line=dict(color="#2E86AB", width=2)))
+                fig = go.Figure(go.Scatter(y=st.session_state["acc_buffer"], mode="lines", name="Acceleration (g)", line=dict(color="#2E86AB", width=2)))
                 fig.update_layout(title="Time-Domain Signal", xaxis_title="Sample", yaxis_title="Acceleration (g)", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40), uirevision=True)
                 st.plotly_chart(fig, use_container_width=True, config={"responsive": True}, key="time_domain_chart")
 
