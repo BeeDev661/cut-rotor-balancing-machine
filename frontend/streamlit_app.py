@@ -410,12 +410,12 @@ def render_dashboard():
         with col1:
             fig = go.Figure(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", line=dict(color="#2E86AB", width=2)))
             fig.update_layout(title="Time-Domain Signal", xaxis_title="Sample", yaxis_title="Acceleration (g)", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
+            st.plotly_chart(fig, use_container_width=True, config={"responsive": True}, key="time_domain_chart")
 
         with col2:
             fig2 = go.Figure(go.Scatter(x=freqs, y=fft, mode="lines", name="Magnitude", line=dict(color="#F77F00", width=2), fill="tozeroy", fillcolor="rgba(247, 127, 0, 0.2)"))
             fig2.update_layout(title="Frequency Domain (FFT)", xaxis_title="Frequency (Hz)", yaxis_title="Magnitude", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig2, use_container_width=True, config={"responsive": True})
+            st.plotly_chart(fig2, use_container_width=True, config={"responsive": True}, key="fft_chart")
         
         st.markdown("---")
         st.markdown("### ⚖️ Balancing Recommendations")
@@ -429,7 +429,7 @@ def render_dashboard():
             fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
             fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_g * 3)), color="#06A77D"), text=[f"{recommended_mass_g:.2f}g"], textposition="bottom center"))
             fig4.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig4, use_container_width=True)
+            st.plotly_chart(fig4, use_container_width=True, key="proportional_bal_chart")
 
         with c2:
             st.markdown("#### 🔬 Physics-Based Recommendation")
@@ -438,7 +438,7 @@ def render_dashboard():
             fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
             fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_physics_g * 0.25)), color="#06A77D"), text=[f"{recommended_mass_physics_g:.2f}g"], textposition="bottom center"))
             fig5.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig5, use_container_width=True)
+            st.plotly_chart(fig5, use_container_width=True, key="physics_bal_chart")
 
     toast = st.session_state.get("toast")
     if toast:
