@@ -51,14 +51,19 @@ mqtt_latest_data: Optional[dict] = None
 
 # ============ Authentication & Cloud DB ============
 # Replace SQLite with Supabase Configuration
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip().strip("'").strip('"')
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "").strip().strip("'").strip('"')
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
 
-# Connect to cloud database
-supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+try:
+    # Connect to cloud database
+    supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    logger.info(f"Supabase client initialized with URL: {SUPABASE_URL[:20]}...")
+except Exception as e:
+    logger.error(f"Failed to initialize Supabase client: {e}")
+    raise
 
 SECRET_KEY = os.environ.get("DASHBOARD_SECRET", "change_this_secret_in_prod")
 ALGORITHM = "HS256"
