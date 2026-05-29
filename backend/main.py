@@ -2,7 +2,6 @@ import asyncio
 import json
 import os
 import time
-import sqlite3
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -12,6 +11,9 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from passlib.context import CryptContext
 import logging
+
+# IMPORT SUPABASE CLIENT
+from supabase import create_client, Client
 
 from backend.simulator import Simulator
 from backend.mqtt_handler import MQTTHandler, mqtt_data_aggregator
@@ -36,8 +38,17 @@ MQTT_USE_TLS = os.getenv("MQTT_USE_TLS", "false").lower() == "true"
 mqtt_handler: Optional[MQTTHandler] = None
 mqtt_latest_data: Optional[dict] = None
 
-# ============ Authentication & DB ============
-DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+# ============ Authentication & Cloud DB ============
+# Replace SQLite with Supabase Configuration
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise RuntimeError("Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
+
+# Connect to cloud database
+supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 SECRET_KEY = os.environ.get("DASHBOARD_SECRET", "change_this_secret_in_prod")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24
@@ -58,62 +69,41 @@ class Token(BaseModel):
     token_type: str
 
 
-def get_db_conn():
-    # allow short timeout and allow connections across threads
-    conn = sqlite3.connect(DB_PATH, timeout=5, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ============ Cloud Database Actions ============
+def get_user(username: str) -> Optional[dict]:
+    """Fetches a user profile from the cloud Supabase database."""
+    try:
+        response = supabase_client.table("users").select("*").eq("username", username).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]
+        return None
+    except Exception as e:
+        logger.error(f"Database read error: {e}")
+        return None
 
 
-def init_db():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    conn = get_db_conn()
-    cur = conn.cursor()
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at REAL NOT NULL
-        )
-        """
-    )
-    conn.commit()
-    conn.close()
+def create_user(username: str, password: str):
+    """Inserts a new user record into the cloud database."""
+    now = time.time()
+    hashed_password = pwd_context.hash(password)
+    
+    # Check if user already exists to prevent duplicate rows
+    if get_user(username):
+        raise HTTPException(status_code=400, detail="Username already exists")
+        
+    try:
+        supabase_client.table("users").insert({
+            "username": username,
+            "password_hash": hashed_password,
+            "created_at": now
+        }).execute()
+    except Exception as e:
+        logger.error(f"Database insert error: {e}")
+        raise HTTPException(status_code=500, detail="Could not register account.")
 
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
-
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-
-def get_user(username: str) -> Optional[sqlite3.Row]:
-    conn = get_db_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM users WHERE username = ?", (username,))
-        row = cur.fetchone()
-        return row
-    finally:
-        conn.close()
-
-
-def create_user(username: str, password: str):
-    conn = get_db_conn()
-    try:
-        cur = conn.cursor()
-        now = time.time()
-        cur.execute(
-            "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-            (username, get_password_hash(password), now),
-        )
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -122,7 +112,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
         expire = datetime.utcnow() + expires_delta
     else:
         expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    # use integer timestamp for exp to avoid JSON serialization issues
     to_encode.update({"exp": int(expire.timestamp())})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -137,17 +126,14 @@ async def broadcaster():
         try:
             data_to_send = None
             
-            # Priority: MQTT data if connected
             if USE_MQTT and mqtt_handler and mqtt_handler.is_connected() and mqtt_latest_data:
                 if mqtt_latest_data.get("acc"):
                     data_to_send = json.dumps(mqtt_latest_data)
                     
-            # Fallback: Simulator data
             if not data_to_send and sim.running and clients:
                 msg = await sim.stream_chunk(duration=0.1)
                 data_to_send = msg
             
-            # Send to all connected clients
             if data_to_send and clients:
                 remove = []
                 for ws in clients:
@@ -162,14 +148,12 @@ async def broadcaster():
         except Exception as e:
             logger.error(f"Broadcaster error: {e}")
             
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)  # Slightly reduced frequency to ease channel load
 
 
 @app.on_event("startup")
 async def startup_event():
     global mqtt_handler, mqtt_latest_data
-    
-    init_db()
     
     # Initialize MQTT if enabled
     if USE_MQTT:
@@ -187,7 +171,7 @@ async def startup_event():
             
             if mqtt_handler.connect():
                 logger.info(f"MQTT initialized: {MQTT_BROKER}:{MQTT_PORT}")
-                await asyncio.sleep(2)  # Allow time for connection
+                await asyncio.sleep(2)
             else:
                 logger.warning("Failed to connect to MQTT broker, falling back to simulator")
                 mqtt_handler = None
@@ -200,27 +184,18 @@ async def startup_event():
 
 @app.post("/signup", response_model=Token)
 async def signup(user: UserCreate):
-    if get_user(user.username):
-        raise HTTPException(status_code=400, detail="Username already exists")
-    try:
-        create_user(user.username, user.password)
-        access_token = create_access_token({"sub": user.username})
-        return {"access_token": access_token, "token_type": "bearer"}
-    except sqlite3.IntegrityError:
-        # race: username inserted by another process between check and insert
-        raise HTTPException(status_code=400, detail="Username already exists")
-    except Exception as e:
-        logger.exception("Error creating user")
-        raise HTTPException(status_code=500, detail=str(e))
+    create_user(user.username, user.password)
+    access_token = create_access_token({"sub": user.username})
+    return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.post("/login", response_model=Token)
 async def login(user: UserCreate):
     try:
-        row = get_user(user.username)
-        if not row:
+        user_record = get_user(user.username)
+        if not user_record:
             raise HTTPException(status_code=400, detail="Incorrect username or password")
-        if not verify_password(user.password, row["password_hash"]):
+        if not verify_password(user.password, user_record["password_hash"]):
             raise HTTPException(status_code=400, detail="Incorrect username or password")
         access_token = create_access_token({"sub": user.username})
         return {"access_token": access_token, "token_type": "bearer"}
@@ -237,9 +212,9 @@ async def websocket_endpoint(websocket: WebSocket):
     clients.append(websocket)
     try:
         while True:
-            # keep connection alive; client may send pings or commands
-            await websocket.receive_text()
-    except WebSocketDisconnect:
+            # Listening block + custom ping interval to prevent Heroku from dropping the line
+            data = await asyncio.wait_for(websocket.receive_text(), timeout=20.0)
+    except (WebSocketDisconnect, asyncio.TimeoutError):
         if websocket in clients:
             clients.remove(websocket)
 
