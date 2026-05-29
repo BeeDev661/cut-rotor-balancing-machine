@@ -7,6 +7,7 @@ from typing import List, Optional
 
 import jwt
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from passlib.context import CryptContext
@@ -24,6 +25,16 @@ load_dotenv()
 
 app = FastAPI()
 sim = Simulator()
+
+# Configure CORS
+origins = os.getenv("CORS_ORIGINS", "*").split(",") # Allow specific origins or all
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 clients: List[WebSocket] = []
 
