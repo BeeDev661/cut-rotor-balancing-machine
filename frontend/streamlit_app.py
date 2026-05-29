@@ -552,6 +552,346 @@ def ws_thread(q: queue.Queue):
             time.sleep(1)
 
 
+# --- Moved dashboard rendering into a separate function (no changes inside) ---
+def render_dashboard():
+    # buffers
+    acc_buffer = np.zeros(4096)
+    sample_rate = 2048
+
+    # amplitude history for rotor-frequency amplitude vs time
+    history_len = st.session_state.get("history_len", 200)
+    amp_history = deque(maxlen=history_len)
+    time_history = deque(maxlen=history_len)
+
+    # user settings for balancing calculation
+    if "bal_radius_cm" not in st.session_state:
+        st.session_state["bal_radius_cm"] = 5.0
+    if "sensitivity" not in st.session_state:
+        st.session_state["sensitivity"] = 1.0
+    if "rotor_mass_kg" not in st.session_state:
+        st.session_state["rotor_mass_kg"] = 1.0
+    if "accel_per_unit_g" not in st.session_state:
+        st.session_state["accel_per_unit_g"] = 1.0
+
+    toast_slot = st.empty()
+    placeholder = st.empty()
+    last_rpm = 0.0
+    initial_placeholder = st.empty()
+
+    # The original infinite loop is removed; we now process one frame per rerun
+    # We'll use a local reference to the queue passed from main
+    q = st.session_state.get("ws_queue")
+    if q is None:
+        return
+
+    # Drain queue once
+    updated = False
+    while not q.empty():
+        data = q.get_nowait()
+        arr = np.array(data.get("acc", []), dtype=float)
+        sr = int(data.get("sample_rate", sample_rate))
+        sample_rate = sr
+        # append to buffer
+        acc_buffer = np.roll(acc_buffer, -len(arr))
+        acc_buffer[-len(arr) :] = arr
+        last_rpm = float(data.get("rpm", last_rpm))
+        updated = True
+
+    # if no live data and local simulator is running, inject synthetic chunk
+    if not updated and st.session_state.get("local_running", False):
+        sim_rpm = float(st.session_state.get("local_rpm", last_rpm))
+        last_rpm = sim_rpm
+        n = int(sample_rate * 0.1)
+        t = np.arange(n) / sample_rate
+        rotor_hz = max(0.1, sim_rpm / 60.0)
+        amp = 1.0
+        signal = amp * np.sin(2 * np.pi * rotor_hz * t) + 0.3 * amp * np.sin(2 * np.pi * 2 * rotor_hz * t)
+        noise = np.random.normal(scale=0.05, size=n)
+        arr = (signal + noise).astype(float)
+        acc_buffer = np.roll(acc_buffer, -len(arr))
+        acc_buffer[-len(arr) :] = arr
+        updated = True
+
+    # clear initial placeholder once live data appears (best-effort)
+    if updated:
+        try:
+            initial_placeholder.empty()
+        except Exception:
+            pass
+
+    # compute FFT (use current buffer even if not updated)
+    n = len(acc_buffer)
+    freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
+    fft_complex = np.fft.rfft(acc_buffer)
+    fft = np.abs(fft_complex)
+
+    # estimate rotor fundamental frequency and its amplitude/phase
+    rotor_hz = max(0.1, last_rpm / 60.0)
+    idx = int(np.argmin(np.abs(freqs - rotor_hz))) if len(freqs) > 0 else 0
+    amp_at_rotor = float(fft[idx]) if idx < len(fft) else 0.0
+    phase_at_rotor = float(np.angle(fft_complex[idx])) if idx < len(fft_complex) else 0.0
+
+    # append to history only when updated
+    if updated:
+        amp_history.append(amp_at_rotor)
+        time_history.append(time.time())
+
+    # convert amplitude to a recommended mass (simple proportional mapping)
+    recommended_mass_g = amp_at_rotor * float(st.session_state.get("sensitivity", 1.0))
+    measured_deg = (np.degrees(phase_at_rotor) + 360.0) % 360.0
+    recommended_angle_deg = (measured_deg + 180.0) % 360.0
+
+    # physics-based calculation
+    rotor_mass_kg = float(st.session_state.get("rotor_mass_kg", 1.0)) if "rotor_mass_kg" in st.session_state else 1.0
+    accel_per_unit_g = float(st.session_state.get("accel_per_unit_g", 1.0)) if "accel_per_unit_g" in st.session_state else 1.0
+    g0 = 9.81
+    amp_m_s2 = amp_at_rotor * accel_per_unit_g * g0
+    r_m = float(st.session_state.get("bal_radius_cm", 5.0)) / 100.0
+    omega = 2.0 * np.pi * rotor_hz
+    recommended_mass_physics_g = 0.0
+    if r_m > 0 and omega > 0:
+        recommended_mass_physics_kg = (amp_m_s2 * rotor_mass_kg) / (r_m * (omega ** 2))
+        recommended_mass_physics_g = max(0.0, recommended_mass_physics_kg * 1000.0)
+    recommended_angle_physics_deg = recommended_angle_deg
+
+    with placeholder.container():
+        # Key metrics at the top
+        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+        
+        with metric_col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">Current RPM</div>
+                <div class="metric-value">{last_rpm:.0f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">Rotor Amplitude</div>
+                <div class="metric-value">{amp_at_rotor:.3f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_col3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">Rotor Frequency</div>
+                <div class="metric-value">{rotor_hz:.2f} Hz</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with metric_col4:
+            status_color = "#06A77D" if st.session_state.get("local_running", False) else "#D62828"
+            status_text = "RUNNING" if st.session_state.get("local_running", False) else "STOPPED"
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">Machine Status</div>
+                <div style="color: {status_color}; font-weight: 700; font-size: 16px;">{status_text}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Time and FFT section
+        st.markdown("### 📈 Real-Time Analysis")
+        col1, col2 = st.columns([2, 1])
+        
+        with col1:
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", 
+                                    line=dict(color="#2E86AB", width=2)))
+            fig.update_layout(
+                title="Time-Domain Signal",
+                xaxis_title="Sample",
+                yaxis_title="Acceleration (g)",
+                height=300,
+                hovermode="x unified",
+                template="plotly_white",
+                margin=dict(l=40, r=40, t=40, b=40),
+                autosize=True
+            )
+            st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
+
+        with col2:
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=freqs, y=fft, mode="lines", name="Magnitude",
+                                     line=dict(color="#F77F00", width=2), fill="tozeroy", fillcolor="rgba(247, 127, 0, 0.2)"))
+            fig2.update_layout(
+                title="Frequency Domain (FFT)",
+                xaxis_title="Frequency (Hz)",
+                yaxis_title="Magnitude",
+                height=300,
+                hovermode="x unified",
+                template="plotly_white",
+                margin=dict(l=40, r=40, t=40, b=40),
+                autosize=True
+            )
+            st.plotly_chart(fig2, use_container_width=True, config={"responsive": True})
+        
+        st.markdown("---")
+        
+        # Amplitude trend
+        st.markdown("### 📊 Amplitude Trend")
+        fig3 = go.Figure()
+        if time_history and amp_history:
+            t0 = np.array(time_history) - time_history[0]
+            fig3.add_trace(go.Scatter(x=t0, y=list(amp_history), mode="lines+markers", name="Rotor Amplitude",
+                                     line=dict(color="#06A77D", width=3),
+                                     marker=dict(size=4, color="#06A77D")))
+        fig3.update_layout(
+            title="Rotor-Frequency Amplitude Over Time",
+            xaxis_title="Time (seconds)",
+            yaxis_title="Amplitude",
+            height=240,
+            hovermode="x unified",
+            template="plotly_white",
+            margin=dict(l=40, r=40, t=40, b=40),
+            autosize=True
+        )
+        st.plotly_chart(fig3, use_container_width=True, config={"responsive": True})
+        
+        st.markdown("---")
+        
+        # Balancing wheels (proportional and physics-based) side-by-side
+        st.markdown("### ⚖️ Balancing Recommendations")
+        c1, c2 = st.columns([1, 1])
+        
+        # proportional wheel
+        with c1:
+            st.markdown("#### 📐 Proportional Recommendation")
+            fig4 = go.Figure()
+            theta = np.linspace(0, 360, 361)
+            fig4.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", 
+                                           name="Rotor", line=dict(color="#2E86AB", width=2)))
+            fig4.add_trace(
+                go.Scatterpolar(
+                    r=[1.0],
+                    theta=[measured_deg],
+                    mode="markers+text",
+                    marker=dict(size=15, color="#D62828"),
+                    text=["Imbalance"],
+                    textposition="top center",
+                    textfont=dict(color="#D62828", size=12),
+                    name="Imbalance"
+                )
+            )
+            mass_size = max(6, min(28, recommended_mass_g * 3))
+            fig4.add_trace(
+                go.Scatterpolar(
+                    r=[1.0],
+                    theta=[recommended_angle_deg],
+                    mode="markers+text",
+                    marker=dict(size=mass_size, color="#06A77D"),
+                    text=[f"{recommended_mass_g:.2f}g"],
+                    textposition="bottom center",
+                    textfont=dict(color="#06A77D", size=11),
+                    name="Correction"
+                )
+            )
+            fig4.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=False, range=[0, 1.2]),
+                    angularaxis=dict(tickfont=dict(size=10))
+                ),
+                showlegend=False,
+                height=260,
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig4, use_container_width=True, config={"responsive": True})
+
+        # physics-based wheel
+        with c2:
+            st.markdown("#### 🔬 Physics-Based Recommendation")
+            fig5 = go.Figure()
+            theta = np.linspace(0, 360, 361)
+            fig5.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", 
+                                           name="Rotor", line=dict(color="#2E86AB", width=2)))
+            fig5.add_trace(
+                go.Scatterpolar(
+                    r=[1.0],
+                    theta=[measured_deg],
+                    mode="markers+text",
+                    marker=dict(size=15, color="#D62828"),
+                    text=["Imbalance"],
+                    textposition="top center",
+                    textfont=dict(color="#D62828", size=12),
+                    name="Imbalance"
+                )
+            )
+            mass_size_phys = max(6, min(28, recommended_mass_physics_g * 0.25))
+            fig5.add_trace(
+                go.Scatterpolar(
+                    r=[1.0],
+                    theta=[recommended_angle_physics_deg],
+                    mode="markers+text",
+                    marker=dict(size=mass_size_phys, color="#06A77D"),
+                    text=[f"{recommended_mass_physics_g:.2f}g"],
+                    textposition="bottom center",
+                    textfont=dict(color="#06A77D", size=11),
+                    name="Correction"
+                )
+            )
+            fig5.update_layout(
+                polar=dict(
+                    radialaxis=dict(visible=False, range=[0, 1.2]),
+                    angularaxis=dict(tickfont=dict(size=10))
+                ),
+                showlegend=False,
+                height=260,
+                margin=dict(l=40, r=40, t=40, b=40)
+            )
+            st.plotly_chart(fig5, use_container_width=True, config={"responsive": True})
+
+        st.markdown("---")
+        
+        # Summary section with better styling
+        st.markdown("### 📋 Summary")
+        summary_col1, summary_col2, summary_col3 = st.columns(3)
+        
+        with summary_col1:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">ROTOR AMPLITUDE</div>
+                <div class="metric-value">{amp_at_rotor:.3f}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with summary_col2:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">PROPORTIONAL CORRECTION</div>
+                <div style="color: #06A77D; font-weight: 700; font-size: 18px;">{recommended_mass_g:.2f}g @ {recommended_angle_deg:.0f}°</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        with summary_col3:
+            st.markdown(f"""
+            <div class="metric-card">
+                <div class="metric-label">PHYSICS-BASED CORRECTION</div>
+                <div style="color: #06A77D; font-weight: 700; font-size: 18px;">{recommended_mass_physics_g:.2f}g @ {recommended_angle_physics_deg:.0f}°</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Toast rendering (original logic)
+    toast = st.session_state.get("toast")
+    if toast:
+        if time.time() > toast.get("expiry", 0):
+            try:
+                st.session_state.pop("toast", None)
+            except Exception:
+                pass
+            toast_slot.empty()
+        else:
+            cls = "stInfo"
+            if toast.get("type") == "success":
+                cls = "stSuccess"
+            elif toast.get("type") == "error":
+                cls = "stError"
+            toast_slot.markdown(f"<div class=\"{cls}\" style=\"padding:12px;border-radius:8px;margin-bottom:8px;\">{toast.get('text')}</div>", unsafe_allow_html=True)
+
+
 def main():
     st.set_page_config(layout="wide", page_title="Rotor Balancing Machine Dashboard")
     
@@ -569,7 +909,7 @@ def main():
         with col_theme1:
             if st.button("☀️ Light" if st.session_state["theme"] == "light" else "Light", use_container_width=True):
                 st.session_state["theme"] = "light"
-                st.rerun()
+                st.rerun()   # fixed: replaced experimental_rerun
         with col_theme2:
             if st.button("🌙 Dark" if st.session_state["theme"] == "dark" else "Dark", use_container_width=True):
                 st.session_state["theme"] = "dark"
@@ -621,7 +961,7 @@ def main():
                                 set_toast(f"{auth_mode} successful!", "success", 4.0)
                                 # hide the auth inputs briefly (3 seconds)
                                 st.session_state["hide_auth_until"] = time.time() + 3.0
-                                st.experimental_rerun()
+                                st.rerun()   # fixed: replaced experimental_rerun
                             elif data:
                                 set_toast(data.get("detail", resp.text), "error", 4.0)
 
@@ -667,12 +1007,12 @@ def main():
     token = st.session_state.get("token")
     if not token:
         st.warning("Please log in or sign up to access the live monitor page.")
-        return
+        st.stop()   # added: stop execution if not logged in
 
-    # Start websocket thread
-    q: queue.Queue = queue.Queue()
-    t = threading.Thread(target=ws_thread, args=(q,), daemon=True)
-    if not any(th.name == "ws_thread" for th in threading.enumerate()):
+    # Start websocket thread (only once)
+    if "ws_queue" not in st.session_state:
+        st.session_state["ws_queue"] = queue.Queue()
+        t = threading.Thread(target=ws_thread, args=(st.session_state["ws_queue"],), daemon=True)
         t.name = "ws_thread"
         t.start()
 
@@ -727,342 +1067,12 @@ def main():
 
     st.markdown("---")
 
-    # buffers
-    acc_buffer = np.zeros(4096)
-    sample_rate = 2048
+    # Call the dashboard rendering function (no loop here)
+    render_dashboard()
 
-    # amplitude history for rotor-frequency amplitude vs time
-    history_len = st.session_state.get("history_len", 200)
-    amp_history = deque(maxlen=history_len)
-    time_history = deque(maxlen=history_len)
-
-    # user settings for balancing calculation
-    if "bal_radius_cm" not in st.session_state:
-        st.session_state["bal_radius_cm"] = 5.0
-    if "sensitivity" not in st.session_state:
-        st.session_state["sensitivity"] = 1.0
-    if "rotor_mass_kg" not in st.session_state:
-        st.session_state["rotor_mass_kg"] = 1.0
-    if "accel_per_unit_g" not in st.session_state:
-        st.session_state["accel_per_unit_g"] = 1.0
-
-    toast_slot = st.empty()
-    placeholder = st.empty()
-    last_rpm = 0.0
-    initial_placeholder = st.empty()
-
-    while True:
-        try:
-            # transient toast rendering and expiry
-            toast = st.session_state.get("toast")
-            if toast:
-                if time.time() > toast.get("expiry", 0):
-                    try:
-                        st.session_state.pop("toast", None)
-                    except Exception:
-                        pass
-                    toast_slot.empty()
-                else:
-                    cls = "stInfo"
-                    if toast.get("type") == "success":
-                        cls = "stSuccess"
-                    elif toast.get("type") == "error":
-                        cls = "stError"
-                    toast_slot.markdown(f"<div class=\"{cls}\" style=\"padding:12px;border-radius:8px;margin-bottom:8px;\">{toast.get('text')}</div>", unsafe_allow_html=True)
-            # drain queue
-            updated = False
-            while not q.empty():
-                data = q.get_nowait()
-                arr = np.array(data.get("acc", []), dtype=float)
-                sr = int(data.get("sample_rate", sample_rate))
-                sample_rate = sr
-                # append to buffer
-                acc_buffer = np.roll(acc_buffer, -len(arr))
-                acc_buffer[-len(arr) :] = arr
-                last_rpm = float(data.get("rpm", last_rpm))
-                updated = True
-
-            # if no live data and local simulator is running, inject synthetic chunk
-            if not updated and st.session_state.get("local_running", False):
-                sim_rpm = float(st.session_state.get("local_rpm", last_rpm))
-                last_rpm = sim_rpm
-                n = int(sample_rate * 0.1)
-                t = np.arange(n) / sample_rate
-                rotor_hz = max(0.1, sim_rpm / 60.0)
-                amp = 1.0
-                signal = amp * np.sin(2 * np.pi * rotor_hz * t) + 0.3 * amp * np.sin(2 * np.pi * 2 * rotor_hz * t)
-                noise = np.random.normal(scale=0.05, size=n)
-                arr = (signal + noise).astype(float)
-                acc_buffer = np.roll(acc_buffer, -len(arr))
-                acc_buffer[-len(arr) :] = arr
-                updated = True
-
-            # clear initial placeholder once live data appears (best-effort)
-            if updated:
-                try:
-                    initial_placeholder.empty()
-                except Exception:
-                    pass
-
-            # compute FFT (use current buffer even if not updated)
-            n = len(acc_buffer)
-            freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
-            fft_complex = np.fft.rfft(acc_buffer)
-            fft = np.abs(fft_complex)
-
-            # estimate rotor fundamental frequency and its amplitude/phase
-            rotor_hz = max(0.1, last_rpm / 60.0)
-            idx = int(np.argmin(np.abs(freqs - rotor_hz))) if len(freqs) > 0 else 0
-            amp_at_rotor = float(fft[idx]) if idx < len(fft) else 0.0
-            phase_at_rotor = float(np.angle(fft_complex[idx])) if idx < len(fft_complex) else 0.0
-
-            # append to history only when updated
-            if updated:
-                amp_history.append(amp_at_rotor)
-                time_history.append(time.time())
-
-            # convert amplitude to a recommended mass (simple proportional mapping)
-            recommended_mass_g = amp_at_rotor * float(st.session_state.get("sensitivity", 1.0))
-            measured_deg = (np.degrees(phase_at_rotor) + 360.0) % 360.0
-            recommended_angle_deg = (measured_deg + 180.0) % 360.0
-
-            # physics-based calculation
-            rotor_mass_kg = float(st.session_state.get("rotor_mass_kg", 1.0)) if "rotor_mass_kg" in st.session_state else 1.0
-            accel_per_unit_g = float(st.session_state.get("accel_per_unit_g", 1.0)) if "accel_per_unit_g" in st.session_state else 1.0
-            g0 = 9.81
-            amp_m_s2 = amp_at_rotor * accel_per_unit_g * g0
-            r_m = float(st.session_state.get("bal_radius_cm", 5.0)) / 100.0
-            omega = 2.0 * np.pi * rotor_hz
-            recommended_mass_physics_g = 0.0
-            if r_m > 0 and omega > 0:
-                recommended_mass_physics_kg = (amp_m_s2 * rotor_mass_kg) / (r_m * (omega ** 2))
-                recommended_mass_physics_g = max(0.0, recommended_mass_physics_kg * 1000.0)
-            recommended_angle_physics_deg = recommended_angle_deg
-
-            with placeholder.container():
-                # Key metrics at the top
-                metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-                
-                with metric_col1:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Current RPM</div>
-                        <div class="metric-value">{last_rpm:.0f}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with metric_col2:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Rotor Amplitude</div>
-                        <div class="metric-value">{amp_at_rotor:.3f}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with metric_col3:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Rotor Frequency</div>
-                        <div class="metric-value">{rotor_hz:.2f} Hz</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with metric_col4:
-                    status_color = "#06A77D" if st.session_state.get("local_running", False) else "#D62828"
-                    status_text = "RUNNING" if st.session_state.get("local_running", False) else "STOPPED"
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">Machine Status</div>
-                        <div style="color: {status_color}; font-weight: 700; font-size: 16px;">{status_text}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                st.markdown("---")
-                
-                # Time and FFT section
-                st.markdown("### 📈 Real-Time Analysis")
-                col1, col2 = st.columns([2, 1])
-                
-                with col1:
-                    fig = go.Figure()
-                    fig.add_trace(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", 
-                                            line=dict(color="#2E86AB", width=2)))
-                    fig.update_layout(
-                        title="Time-Domain Signal",
-                        xaxis_title="Sample",
-                        yaxis_title="Acceleration (g)",
-                        height=300,
-                        hovermode="x unified",
-                        template="plotly_white",
-                        margin=dict(l=40, r=40, t=40, b=40),
-                        autosize=True
-                    )
-                    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
-
-                with col2:
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(x=freqs, y=fft, mode="lines", name="Magnitude",
-                                             line=dict(color="#F77F00", width=2), fill="tozeroy", fillcolor="rgba(247, 127, 0, 0.2)"))
-                    fig2.update_layout(
-                        title="Frequency Domain (FFT)",
-                        xaxis_title="Frequency (Hz)",
-                        yaxis_title="Magnitude",
-                        height=300,
-                        hovermode="x unified",
-                        template="plotly_white",
-                        margin=dict(l=40, r=40, t=40, b=40),
-                        autosize=True
-                    )
-                    st.plotly_chart(fig2, use_container_width=True, config={"responsive": True})
-                
-                st.markdown("---")
-                
-                # Amplitude trend
-                st.markdown("### 📊 Amplitude Trend")
-                fig3 = go.Figure()
-                if time_history and amp_history:
-                    t0 = np.array(time_history) - time_history[0]
-                    fig3.add_trace(go.Scatter(x=t0, y=list(amp_history), mode="lines+markers", name="Rotor Amplitude",
-                                             line=dict(color="#06A77D", width=3),
-                                             marker=dict(size=4, color="#06A77D")))
-                fig3.update_layout(
-                    title="Rotor-Frequency Amplitude Over Time",
-                    xaxis_title="Time (seconds)",
-                    yaxis_title="Amplitude",
-                    height=240,
-                    hovermode="x unified",
-                    template="plotly_white",
-                    margin=dict(l=40, r=40, t=40, b=40),
-                    autosize=True
-                )
-                st.plotly_chart(fig3, use_container_width=True, config={"responsive": True})
-                
-                st.markdown("---")
-                
-                # Balancing wheels (proportional and physics-based) side-by-side
-                st.markdown("### ⚖️ Balancing Recommendations")
-                c1, c2 = st.columns([1, 1])
-                
-                # proportional wheel
-                with c1:
-                    st.markdown("#### 📐 Proportional Recommendation")
-                    fig4 = go.Figure()
-                    theta = np.linspace(0, 360, 361)
-                    fig4.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", 
-                                                   name="Rotor", line=dict(color="#2E86AB", width=2)))
-                    fig4.add_trace(
-                        go.Scatterpolar(
-                            r=[1.0],
-                            theta=[measured_deg],
-                            mode="markers+text",
-                            marker=dict(size=15, color="#D62828"),
-                            text=["Imbalance"],
-                            textposition="top center",
-                            textfont=dict(color="#D62828", size=12),
-                            name="Imbalance"
-                        )
-                    )
-                    mass_size = max(6, min(28, recommended_mass_g * 3))
-                    fig4.add_trace(
-                        go.Scatterpolar(
-                            r=[1.0],
-                            theta=[recommended_angle_deg],
-                            mode="markers+text",
-                            marker=dict(size=mass_size, color="#06A77D"),
-                            text=[f"{recommended_mass_g:.2f}g"],
-                            textposition="bottom center",
-                            textfont=dict(color="#06A77D", size=11),
-                            name="Correction"
-                        )
-                    )
-                    fig4.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=False, range=[0, 1.2]),
-                            angularaxis=dict(tickfont=dict(size=10))
-                        ),
-                        showlegend=False,
-                        height=260,
-                        margin=dict(l=40, r=40, t=40, b=40)
-                    )
-                    st.plotly_chart(fig4, use_container_width=True, config={"responsive": True})
-
-                # physics-based wheel
-                with c2:
-                    st.markdown("#### 🔬 Physics-Based Recommendation")
-                    fig5 = go.Figure()
-                    theta = np.linspace(0, 360, 361)
-                    fig5.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", 
-                                                   name="Rotor", line=dict(color="#2E86AB", width=2)))
-                    fig5.add_trace(
-                        go.Scatterpolar(
-                            r=[1.0],
-                            theta=[measured_deg],
-                            mode="markers+text",
-                            marker=dict(size=15, color="#D62828"),
-                            text=["Imbalance"],
-                            textposition="top center",
-                            textfont=dict(color="#D62828", size=12),
-                            name="Imbalance"
-                        )
-                    )
-                    mass_size_phys = max(6, min(28, recommended_mass_physics_g * 0.25))
-                    fig5.add_trace(
-                        go.Scatterpolar(
-                            r=[1.0],
-                            theta=[recommended_angle_physics_deg],
-                            mode="markers+text",
-                            marker=dict(size=mass_size_phys, color="#06A77D"),
-                            text=[f"{recommended_mass_physics_g:.2f}g"],
-                            textposition="bottom center",
-                            textfont=dict(color="#06A77D", size=11),
-                            name="Correction"
-                        )
-                    )
-                    fig5.update_layout(
-                        polar=dict(
-                            radialaxis=dict(visible=False, range=[0, 1.2]),
-                            angularaxis=dict(tickfont=dict(size=10))
-                        ),
-                        showlegend=False,
-                        height=260,
-                        margin=dict(l=40, r=40, t=40, b=40)
-                    )
-                    st.plotly_chart(fig5, use_container_width=True, config={"responsive": True})
-
-                st.markdown("---")
-                
-                # Summary section with better styling
-                st.markdown("### 📋 Summary")
-                summary_col1, summary_col2, summary_col3 = st.columns(3)
-                
-                with summary_col1:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">ROTOR AMPLITUDE</div>
-                        <div class="metric-value">{amp_at_rotor:.3f}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with summary_col2:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">PROPORTIONAL CORRECTION</div>
-                        <div style="color: #06A77D; font-weight: 700; font-size: 18px;">{recommended_mass_g:.2f}g @ {recommended_angle_deg:.0f}°</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                with summary_col3:
-                    st.markdown(f"""
-                    <div class="metric-card">
-                        <div class="metric-label">PHYSICS-BASED CORRECTION</div>
-                        <div style="color: #06A77D; font-weight: 700; font-size: 18px;">{recommended_mass_physics_g:.2f}g @ {recommended_angle_physics_deg:.0f}°</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-            time.sleep(0.1)
-        except Exception as e:
-            st.error(f"Error: {e}")
-            time.sleep(1)
+    # --- IMPORTANT: Request a rerun after a short delay to keep the UI alive ---
+    time.sleep(0.5)
+    st.rerun()
 
 
 if __name__ == "__main__":
