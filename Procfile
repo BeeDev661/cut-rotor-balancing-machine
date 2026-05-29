@@ -1,1 +1,2 @@
-web: streamlit run main.py --server.port=$PORT --server.address=0.0.0.0
+web: streamlit run frontend/streamlit_app.py --server.port=$PORT --server.address=0.0.0.0
+worker: python backend/main.py
