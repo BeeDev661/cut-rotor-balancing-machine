@@ -1,13 +1,15 @@
-fastapi==0.95.2
-uvicorn[standard]==0.22.0
-numpy==1.26.2
-streamlit==1.26.0
-websocket-client==1.6.1
-requests==2.31.0
-plotly==5.17.0
-passlib[bcrypt]==1.7.4
-PyJWT==2.8.0
-paho-mqtt==1.6.1
-python-dotenv==1.0.0
-supabase==2.3.4
-uvicorn==0.23.2
+# --- Frontend (Streamlit) ---
+streamlit
+requests
+numpy
+plotly
+websocket-client
+
+# --- Backend (Heroku) ---
+fastapi
+uvicorn
+supabase
+passlib
+PyJWT
+python-dotenv
+paho-mqtt
