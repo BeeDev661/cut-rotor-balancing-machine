@@ -58,10 +58,8 @@ async def broadcaster():
             if USE_MQTT and mqtt_handler and mqtt_handler.is_connected() and mqtt_latest_data:
                 if mqtt_latest_data.get("acc"):
                     data_to_send = json.dumps(mqtt_latest_data)
-                    
-            if not data_to_send and sim.running and clients:
-                msg = await sim.stream_chunk(duration=0.1)
-                data_to_send = msg
+            # If USE_MQTT is true, only MQTT data is sent.
+            # If USE_MQTT is false, no data will be sent by the broadcaster.
             
             if data_to_send and clients:
                 remove = []
@@ -102,11 +100,11 @@ async def startup_event():
                 logger.info(f"MQTT initialized: {MQTT_BROKER}:{MQTT_PORT}")
                 await asyncio.sleep(2)
             else:
-                logger.warning("Failed to connect to MQTT broker, falling back to simulator")
-                mqtt_handler = None
+                logger.warning("Failed to connect to MQTT broker. Dashboard will wait for ESP32 signal.")
+                # mqtt_handler is kept, but its is_connected() will be false, so no data is sent.
         except Exception as e:
-            logger.error(f"MQTT initialization failed: {e}, falling back to simulator")
-            mqtt_handler = None
+            logger.error(f"MQTT initialization failed: {e}. Dashboard will wait for ESP32 signal.")
+            # mqtt_handler is kept, but its is_connected() will be false, so no data is sent.
     
     asyncio.create_task(broadcaster())
 

@@ -333,6 +333,10 @@ def render_dashboard():
     if "sensitivity" not in st.session_state: st.session_state["sensitivity"] = 1.0
     if "rotor_mass_kg" not in st.session_state: st.session_state["rotor_mass_kg"] = 1.0
     if "accel_per_unit_g" not in st.session_state: st.session_state["accel_per_unit_g"] = 1.0
+    
+    # Signal Tracking States
+    if "last_signal_time" not in st.session_state: st.session_state["last_signal_time"] = 0
+    if "has_signal" not in st.session_state: st.session_state["has_signal"] = False
 
     toast_slot = st.empty()
     placeholder = st.empty()
@@ -349,6 +353,13 @@ def render_dashboard():
         acc_buffer = np.roll(acc_buffer, -len(arr))
         acc_buffer[-len(arr) :] = arr
         last_rpm = float(data.get("rpm", last_rpm))
+        
+        # Logic for new signal notification
+        if not st.session_state["has_signal"]:
+            set_toast("🚀 ESP32 Signal Received! Monitoring Live.", "success", duration=4.0)
+            st.session_state["has_signal"] = True
+            
+        st.session_state["last_signal_time"] = time.time()
         updated = True
 
     if not updated and st.session_state.get("local_running", False):
@@ -362,6 +373,11 @@ def render_dashboard():
         acc_buffer = np.roll(acc_buffer, -len(arr))
         acc_buffer[-len(arr) :] = arr
         updated = True
+    # Check for signal loss (timeout after 5 seconds)
+    if time.time() - st.session_state["last_signal_time"] > 5.0:
+        if st.session_state["has_signal"]:
+            st.session_state["has_signal"] = False
+        updated = False # Block chart rendering
 
     n = len(acc_buffer)
     freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
@@ -390,55 +406,69 @@ def render_dashboard():
     if r_m > 0 and omega > 0:
         recommended_mass_physics_g = max(0.0, ((amp_m_s2 * rotor_mass_kg) / (r_m * (omega ** 2))) * 1000.0)
 
-    with placeholder.container():
-        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-        with metric_col1:
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Current RPM</div><div class="metric-value">{last_rpm:.0f}</div></div>', unsafe_allow_html=True)
-        with metric_col2:
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Rotor Amplitude</div><div class="metric-value">{amp_at_rotor:.3f}</div></div>', unsafe_allow_html=True)
-        with metric_col3:
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Rotor Frequency</div><div class="metric-value">{rotor_hz:.2f} Hz</div></div>', unsafe_allow_html=True)
-        with metric_col4:
-            status_color = "#06A77D" if st.session_state.get("local_running", False) else "#D62828"
-            status_text = "RUNNING" if st.session_state.get("local_running", False) else "STOPPED"
-            st.markdown(f'<div class="metric-card"><div class="metric-label">Machine Status</div><div style="color: {status_color}; font-weight: 700; font-size: 16px;">{status_text}</div></div>', unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### 📈 Real-Time Analysis")
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            fig = go.Figure(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", line=dict(color="#2E86AB", width=2)))
-            fig.update_layout(title="Time-Domain Signal", xaxis_title="Sample", yaxis_title="Acceleration (g)", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig, use_container_width=True, config={"responsive": True}, key="time_domain_chart")
+    with placeholder.container(): # Use a container to update all elements at once
+        if not updated: # If no new data from ESP32
+            st.info(st.session_state["signal_status_message"])
+            # Display empty charts or a message over them
+        if not updated: 
+            st.error("📡 No ESP32 Signal Detected. Check hardware connection or WiFi.")
+            st.markdown("---")
+            st.markdown("### 📈 Real-Time Analysis")
+            st.warning("No live data to display. Waiting for ESP32 signal...")
+            st.info("The dashboard is ready. Charts will appear once the ESP32 starts transmitting.")
+            st.markdown("---")
+            st.markdown("### ⚖️ Balancing Recommendations")
+            st.warning("No live data to display. Waiting for ESP32 signal...")
+            st.info("Waiting for live signal...")
+        else: # Display charts with live data
+            metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+            with metric_col1:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">Current RPM</div><div class="metric-value">{last_rpm:.0f}</div></div>', unsafe_allow_html=True)
+            with metric_col2:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">Rotor Amplitude</div><div class="metric-value">{amp_at_rotor:.3f}</div></div>', unsafe_allow_html=True)
+            with metric_col3:
+                st.markdown(f'<div class="metric-card"><div class="metric-label">Rotor Frequency</div><div class="metric-value">{rotor_hz:.2f} Hz</div></div>', unsafe_allow_html=True)
+            with metric_col4:
+                status_color = "#06A77D" # Always green if data is updated
+                status_text = "LIVE"
+                st.markdown(f'<div class="metric-card"><div class="metric-label">Machine Status</div><div style="color: {status_color}; font-weight: 700; font-size: 16px;">{status_text}</div></div>', unsafe_allow_html=True)
+            
+            st.markdown("---")
+            st.markdown("### 📈 Real-Time Analysis")
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                fig = go.Figure(go.Scatter(y=acc_buffer, mode="lines", name="Acceleration (g)", line=dict(color="#2E86AB", width=2)))
+                fig.update_layout(title="Time-Domain Signal", xaxis_title="Sample", yaxis_title="Acceleration (g)", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40), uirevision=True)
+                st.plotly_chart(fig, use_container_width=True, config={"responsive": True}, key="time_domain_chart")
 
-        with col2:
-            fig2 = go.Figure(go.Scatter(x=freqs, y=fft, mode="lines", name="Magnitude", line=dict(color="#F77F00", width=2), fill="tozeroy", fillcolor="rgba(247, 127, 0, 0.2)"))
-            fig2.update_layout(title="Frequency Domain (FFT)", xaxis_title="Frequency (Hz)", yaxis_title="Magnitude", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig2, use_container_width=True, config={"responsive": True}, key="fft_chart")
-        
-        st.markdown("---")
-        st.markdown("### ⚖️ Balancing Recommendations")
-        c1, c2 = st.columns(2)
-        
-        with c1:
-            st.markdown("#### 📐 Proportional Recommendation")
-            fig4 = go.Figure()
-            theta = np.linspace(0, 360, 361)
-            fig4.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", line=dict(color="#2E86AB", width=2)))
-            fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
-            fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_g * 3)), color="#06A77D"), text=[f"{recommended_mass_g:.2f}g"], textposition="bottom center"))
-            fig4.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig4, use_container_width=True, key="proportional_bal_chart")
+            with col2:
+                fig2 = go.Figure(go.Scatter(x=freqs, y=fft, mode="lines", name="Magnitude", line=dict(color="#F77F00", width=2), fill="tozeroy", fillcolor="rgba(247, 127, 0, 0.2)"))
+                fig2.update_layout(title="Frequency Domain (FFT)", xaxis_title="Frequency (Hz)", yaxis_title="Magnitude", height=300, template="plotly_white", margin=dict(l=40,r=40,t=40,b=40), uirevision=True)
+                st.plotly_chart(fig2, use_container_width=True, config={"responsive": True}, key="fft_chart")
+            
+            st.markdown("---")
+            st.markdown("### ⚖️ Balancing Recommendations")
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                st.markdown("#### 📐 Proportional Recommendation")
+                fig4 = go.Figure()
+                theta = np.linspace(0, 360, 361)
+                fig4.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", line=dict(color="#2E86AB", width=2)))
+                fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
+                fig4.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_g * 3)), color="#06A77D"), text=[f"{recommended_mass_g:.2f}g"], textposition="bottom center"))
+                fig4.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40), uirevision=True)
+                st.plotly_chart(fig4, use_container_width=True, key="proportional_bal_chart")
 
-        with c2:
-            st.markdown("#### 🔬 Physics-Based Recommendation")
-            fig5 = go.Figure()
-            fig5.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", line=dict(color="#2E86AB", width=2)))
-            fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
-            fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_physics_g * 0.25)), color="#06A77D"), text=[f"{recommended_mass_physics_g:.2f}g"], textposition="bottom center"))
-            fig5.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40))
-            st.plotly_chart(fig5, use_container_width=True, key="physics_bal_chart")
+            with c2:
+                st.markdown("#### 🔬 Physics-Based Recommendation")
+                fig5 = go.Figure()
+                fig5.add_trace(go.Scatterpolar(r=[1.0] * len(theta), theta=theta, mode="lines", line=dict(color="#2E86AB", width=2)))
+                fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[measured_deg], mode="markers+text", marker=dict(size=15, color="#D62828"), text=["Imbalance"], textposition="top center"))
+                fig5.add_trace(go.Scatterpolar(r=[1.0], theta=[recommended_angle_deg], mode="markers+text", marker=dict(size=max(6, min(28, recommended_mass_physics_g * 0.25)), color="#06A77D"), text=[f"{recommended_mass_physics_g:.2f}g"], textposition="bottom center"))
+                fig5.update_layout(polar=dict(radialaxis=dict(visible=False, range=[0, 1.2])), showlegend=False, height=260, margin=dict(l=40,r=40,t=40,b=40), uirevision=True)
+                st.plotly_chart(fig5, use_container_width=True, key="physics_bal_chart")
 
     toast = st.session_state.get("toast")
     if toast:
@@ -476,28 +506,29 @@ def main():
         t = threading.Thread(target=ws_thread, args=(st.session_state["ws_queue"],), daemon=True)
         t.start()
 
-    headers = {}
-    if "local_running" not in st.session_state: st.session_state["local_running"] = False
-    if "local_rpm" not in st.session_state: st.session_state["local_rpm"] = 30.0
+    # The start/stop/set_speed buttons now only interact with the backend's simulator.
+    # If USE_MQTT is true in the backend, these commands will not affect the displayed data.
+    # The dashboard itself will only display data from the ESP32.
 
     st.markdown("### 🎮 Machine Controls")
     ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns(4)
     with ctrl_col1:
         if st.button("▶️ Start", use_container_width=True):
-            st.session_state["local_running"] = True
-            try: requests.post(f"{API_URL}/start", headers=headers, timeout=3)
+            # This will trigger the backend to start its internal simulator if MQTT is not active
+            try: requests.post(f"{API_URL}/start", timeout=3)
             except Exception: pass
     with ctrl_col2:
         if st.button("⏹️ Stop", use_container_width=True):
-            st.session_state["local_running"] = False
-            try: requests.post(f"{API_URL}/stop", headers=headers, timeout=3)
+            # This will trigger the backend to stop its internal simulator
+            try: requests.post(f"{API_URL}/stop", timeout=3)
             except Exception: pass
     with ctrl_col3:
-        rpm = st.slider("Set RPM", min_value=10, max_value=100, value=int(st.session_state["local_rpm"]), step=5)
+        # Default value for slider is now independent of local_rpm state
+        rpm = st.slider("Set RPM", min_value=10, max_value=100, value=30, step=5)
     with ctrl_col4:
         if st.button("✓ Apply Speed", use_container_width=True):
-            st.session_state["local_rpm"] = float(rpm)
-            try: requests.post(f"{API_URL}/set_speed/{rpm}", headers=headers, timeout=3)
+            # This will trigger the backend to set the simulator's RPM
+            try: requests.post(f"{API_URL}/set_speed/{rpm}", timeout=3)
             except Exception: pass
 
     render_dashboard()
